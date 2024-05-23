@@ -1,4 +1,4 @@
-module github.com/taviowong/libdns-dynu
+module github.com/libdns/dynu
 
 go 1.19
 
