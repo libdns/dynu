@@ -7,10 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"sync"
 	"time"
+
+	"github.com/cenkalti/backoff/v4"
 )
 
 const defaultBaseURL = "https://api.dynu.com/v2"
@@ -44,7 +47,7 @@ func (c *Client) GetRootDomain(ctx context.Context, hostname string) (*DNSHostna
 	endpoint := c.joinUrlPath("dns", "getroot", hostname)
 	apiResponse := DNSHostname{}
 	apiException := APIException{}
-	err := c.doWithCustomError(ctx, http.MethodGet, endpoint.String(), nil, &apiResponse, &apiException)
+	err := c.doRetryWithCustomError(ctx, http.MethodGet, endpoint.String(), nil, &apiResponse, &apiException)
 	if err != nil {
 		return nil, err
 	}
@@ -65,7 +68,7 @@ func (c *Client) GetRecords(ctx context.Context, hostnameId int64) ([]DNSRecord,
 
 	apiResponse := RecordsResponse{}
 	apiException := APIException{}
-	err := c.doWithCustomError(ctx, http.MethodGet, endpoint.String(), nil, &apiResponse, &apiException)
+	err := c.doRetryWithCustomError(ctx, http.MethodGet, endpoint.String(), nil, &apiResponse, &apiException)
 	if err != nil {
 		return nil, err
 	}
@@ -95,7 +98,7 @@ func (c *Client) AddOrUpdateRecord(ctx context.Context, hostnameId int64, record
 
 	apiResponse := DNSRecord{}
 	apiException := APIException{}
-	err = c.doWithCustomError(ctx, http.MethodPost, endpoint.String(), reqBody, &apiResponse, &apiException)
+	err = c.doRetryWithCustomError(ctx, http.MethodPost, endpoint.String(), reqBody, &apiResponse, &apiException)
 	if err != nil {
 		return nil, err
 	}
@@ -115,7 +118,7 @@ func (c *Client) DeleteRecord(ctx context.Context, hostnameId int64, dnsRecordId
 
 	apiResponse := DeleteResponse{}
 	apiException := APIException{}
-	err := c.doWithCustomError(ctx, http.MethodDelete, endpoint.String(), nil, &apiResponse, &apiException)
+	err := c.doRetryWithCustomError(ctx, http.MethodDelete, endpoint.String(), nil, &apiResponse, &apiException)
 	if err != nil {
 		return err
 	}
@@ -127,6 +130,22 @@ func (c *Client) DeleteRecord(ctx context.Context, hostnameId int64, dnsRecordId
 	return nil
 }
 
+// retry with exponential backoff on EOF
+func (c *Client) doRetryWithCustomError(ctx context.Context, method, uri string, body []byte, result any, errorResult any) error {
+	operation := func() error {
+		return c.doWithCustomError(ctx, method, uri, body, result, errorResult)
+	}
+
+	notify := func(err error, duration time.Duration) {
+		log.Printf("client retrying in %s because of %v", duration, err)
+	}
+
+	bo := backoff.NewExponentialBackOff(backoff.WithInitialInterval(1 * time.Second))
+
+	err := backoff.RetryNotify(operation, bo, notify)
+	return err
+}
+
 // exception fields are at the top level of json rather than nested under exception object; parse json again as custom exception object for error logging
 func (c *Client) doWithCustomError(ctx context.Context, method, uri string, body []byte, result any, errorResult any) error {
 	var reqBody io.Reader
@@ -136,7 +155,7 @@ func (c *Client) doWithCustomError(ctx context.Context, method, uri string, body
 
 	req, err := http.NewRequestWithContext(ctx, method, uri, reqBody)
 	if err != nil {
-		return fmt.Errorf("unable to create request: %w", err)
+		return backoff.Permanent(fmt.Errorf("unable to create request: %w", err))
 	}
 
 	req.Header.Set("Accept", "application/json")
@@ -149,19 +168,19 @@ func (c *Client) doWithCustomError(ctx context.Context, method, uri string, body
 	}
 
 	if err != nil {
-		return err
+		return backoff.Permanent(err)
 	}
 
 	defer func() { _ = resp.Body.Close() }()
 
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return err
+		return backoff.Permanent(err)
 	}
 
 	err = json.Unmarshal(raw, result)
 	if err != nil {
-		return err
+		return backoff.Permanent(err)
 	}
 
 	if errorResult != nil {
