@@ -2,7 +2,7 @@ module github.com/libdns/dynu
 
 go 1.19
 
-require github.com/libdns/libdns v0.2.2
+require github.com/libdns/libdns v1.0.0
 
 require github.com/cenkalti/backoff/v4 v4.3.0
 
